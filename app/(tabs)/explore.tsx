@@ -91,8 +91,8 @@ export default function ExploreScreen() {
         initialRegion={{
           latitude: 52.0,
           longitude: 19.0,
-          latitudeDelta: 5.0,
-          longitudeDelta: 5.0,
+          latitudeDelta: 0.05,
+          longitudeDelta: 0.05,
         }}
       >
         <UrlTile
