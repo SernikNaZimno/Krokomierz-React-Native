@@ -18,7 +18,8 @@ export default function HomeScreen() {
   
   // Stan dla statystyk
   const [selectedPeriod, setSelectedPeriod] = useState<keyof typeof PERIODS>('WEEK');
-  const [periodTotalSteps, setPeriodTotalSteps] = useState(0);
+  // Zastąpiliśmy stare periodTotalSteps nową zmienną historicalSteps
+  const [historicalSteps, setHistoricalSteps] = useState(0);
   const [isDbReady, setIsDbReady] = useState(false);
   const [db, setDb] = useState<SQLite.SQLiteDatabase | null>(null);
 
@@ -34,14 +35,6 @@ export default function HomeScreen() {
             date TEXT PRIMARY KEY,
             steps INTEGER
           );
-        `);
-
-        // Wstrzyknięcie danych testowych (możesz to usunąć, gdy upewnisz się, że działa)
-        await database.execAsync(`
-          INSERT OR IGNORE INTO daily_steps (date, steps) VALUES (date('now', '-1 days'), 4500);
-          INSERT OR IGNORE INTO daily_steps (date, steps) VALUES (date('now', '-10 days'), 12000);
-          INSERT OR IGNORE INTO daily_steps (date, steps) VALUES (date('now', '-40 days'), 8000);
-          INSERT OR IGNORE INTO daily_steps (date, steps) VALUES (date('now', '-100 days'), 25000);
         `);
 
         setIsDbReady(true);
@@ -69,6 +62,7 @@ export default function HomeScreen() {
           if (isAvailable) {
             subscription = Pedometer.watchStepCount(async (result) => {
               setStepCount(result.steps);
+              
               // Zapis do bazy w czasie rzeczywistym
               try {
                 await db.runAsync(
@@ -98,27 +92,37 @@ export default function HomeScreen() {
     };
   }, [isDbReady, db]);
 
-  // 3. Pobieranie statystyk (Bezpieczna wersja)
+  // 3. Pobieranie statystyk historycznych (z Debouncem)
   useEffect(() => {
     if (!db || !isDbReady) return;
     
-    const updateStats = async () => {
+    let isCancelled = false; 
+    
+    const fetchHistoricalStats = async () => {
       try {
         const modifier = PERIODS[selectedPeriod]?.sqlModifier || '-7 days';
         
-        // Zabezpieczone zapytanie bez bindowania znaku '?'
         const result = await db.getAllAsync<{ total: number }>(
-          `SELECT SUM(steps) as total FROM daily_steps WHERE date >= date('now', '${modifier}')`
+          `SELECT SUM(steps) as total FROM daily_steps WHERE date >= date('now', '${modifier}') AND date < date('now')`
         );
         
-        setPeriodTotalSteps(result[0]?.total || 0);
+        if (!isCancelled) {
+          setHistoricalSteps(result[0]?.total || 0);
+        }
       } catch (error) {
         console.error("Błąd podczas przeliczania statystyk: ", error);
       }
     };
 
-    updateStats();
-  }, [selectedPeriod, stepCount, isDbReady, db]);
+    const timeoutId = setTimeout(() => {
+      fetchHistoricalStats();
+    }, 150);
+
+    return () => {
+      isCancelled = true;
+      clearTimeout(timeoutId);
+    };
+  }, [selectedPeriod, isDbReady, db]);
 
   // Ekran ładowania
   if (!isDbReady) {
@@ -157,7 +161,7 @@ export default function HomeScreen() {
         </View>
 
         <Text style={styles.periodResult}>
-          Suma kroków: <Text style={styles.periodTotal}>{periodTotalSteps}</Text>
+          Suma kroków: <Text style={styles.periodTotal}>{historicalSteps + stepCount}</Text>
         </Text>
       </View>
     </View>

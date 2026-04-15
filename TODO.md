@@ -1,0 +1,15 @@
+# TODO #
+- [] początkowe przybliżenie mapy
+- [] +/- do przybliżania / oddalania mapy
+- [] ustawienia
+  - light / dark mode
+  - domyślne przyblizenie
+  - wielkość czcionki
+  - wielkość ikon
+  - colorblind mode
+- [] zachowywanie danych między sesjami
+- [] naprawienie liczenia kroków
+- [] dodanie rozwijanego graphu do statystyk
+- [] stestowanie aplikacji na dalszych dystansach (zostawienie jej włączonej przez całą drogę do domu)
+- [] zmiana znacznika użytkownika na mapie
+- [] dynamiczny obszar odkrywania bazujący na horyzoncie (?)
