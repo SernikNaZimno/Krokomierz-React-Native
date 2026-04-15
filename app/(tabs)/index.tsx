@@ -26,11 +26,9 @@ export default function HomeScreen() {
   useEffect(() => {
     const setupDatabase = async () => {
       try {
-        // Otwieramy/tworzymy bazę danych
         const database = await SQLite.openDatabaseAsync('krokomierz.db');
         setDb(database);
 
-        // Tworzymy tabelę, w której kluczem głównym jest data (np. '2023-10-25')
         await database.execAsync(`
           CREATE TABLE IF NOT EXISTS daily_steps (
             date TEXT PRIMARY KEY,
@@ -38,8 +36,7 @@ export default function HomeScreen() {
           );
         `);
 
-        // WSTRZYKNIĘCIE DANYCH TESTOWYCH (Abyś widział, że statystyki działają)
-        // Zapisujemy sztuczne kroki z wczoraj, sprzed 10 dni i sprzed 40 dni
+        // Wstrzyknięcie danych testowych (możesz to usunąć, gdy upewnisz się, że działa)
         await database.execAsync(`
           INSERT OR IGNORE INTO daily_steps (date, steps) VALUES (date('now', '-1 days'), 4500);
           INSERT OR IGNORE INTO daily_steps (date, steps) VALUES (date('now', '-10 days'), 12000);
@@ -49,75 +46,81 @@ export default function HomeScreen() {
 
         setIsDbReady(true);
       } catch (error) {
-        console.error("Błąd bazy danych: ", error);
+        console.error("Błąd inicjalizacji bazy danych: ", error);
       }
     };
 
     setupDatabase();
   }, []);
 
-  // 2. Pobieranie statystyk z wybranego okresu
+  // 2. Obsługa Krokomierza i zapis na żywo
   useEffect(() => {
-    const fetchStats = async () => {
-      if (!db || !isDbReady) return;
+    if (!isDbReady || !db) return;
 
-      const modifier = PERIODS[selectedPeriod].sqlModifier;
-      try {
-        // Używamy natywnej funkcji SQLite date() do filtrowania czasu
-        const result = await db.getAllAsync<{ total: number }>(
-          `SELECT SUM(steps) as total FROM daily_steps WHERE date >= date('now', ?)`, 
-          [modifier]
-        );
-        
-        // getAllAsync zwraca tablicę obiektów
-        const total = result[0]?.total || 0;
-        setPeriodTotalSteps(total);
-      } catch (error) {
-        console.error("Błąd pobierania statystyk: ", error);
-      }
-    };
-
-    fetchStats();
-  }, [selectedPeriod, isDbReady, db, stepCount]); // Dodajemy stepCount, by statystyki odświeżały się podczas chodzenia
-
-  // 3. Logika Krokomierza
-  useEffect(() => {
     let subscription: Pedometer.Subscription | null = null;
 
     const startPedometer = async () => {
-      const permission = await Pedometer.requestPermissionsAsync();
-      if (permission.granted) {
-        const isAvailable = await Pedometer.isAvailableAsync();
-        setIsPedometerAvailable(isAvailable ? 'Dostępny' : 'Brak sprzętu');
+      try {
+        const permission = await Pedometer.requestPermissionsAsync();
+        if (permission.granted) {
+          const isAvailable = await Pedometer.isAvailableAsync();
+          setIsPedometerAvailable(isAvailable ? 'Dostępny' : 'Brak sprzętu');
 
-        if (isAvailable && db && isDbReady) {
-          subscription = Pedometer.watchStepCount(async (result) => {
-            setStepCount(result.steps);
-            
-            // Zapisujemy/Aktualizujemy dzisiejsze kroki w bazie
-            try {
-              await db.runAsync(
-                `INSERT INTO daily_steps (date, steps) VALUES (date('now'), ?)
-                 ON CONFLICT(date) DO UPDATE SET steps = ?`,
-                [result.steps, result.steps]
-              );
-            } catch (err) {
-              console.error("Błąd zapisu kroków: ", err);
-            }
-          });
+          if (isAvailable) {
+            subscription = Pedometer.watchStepCount(async (result) => {
+              setStepCount(result.steps);
+              // Zapis do bazy w czasie rzeczywistym
+              try {
+                await db.runAsync(
+                  `INSERT INTO daily_steps (date, steps) VALUES (date('now'), ?)
+                   ON CONFLICT(date) DO UPDATE SET steps = ?`,
+                  [result.steps, result.steps]
+                );
+              } catch (err) {
+                console.error("Błąd zapisu kroków: ", err);
+              }
+            });
+          }
+        } else {
+          setIsPedometerAvailable('Brak uprawnień');
         }
-      } else {
-        setIsPedometerAvailable('Brak uprawnień');
+      } catch (error) {
+        console.error("Błąd krokomierza: ", error);
       }
     };
 
-    if (isDbReady) {
-      startPedometer();
-    }
+    startPedometer();
 
-    return () => { subscription?.remove(); };
+    return () => {
+      if (subscription) {
+        subscription.remove();
+      }
+    };
   }, [isDbReady, db]);
 
+  // 3. Pobieranie statystyk (Bezpieczna wersja)
+  useEffect(() => {
+    if (!db || !isDbReady) return;
+    
+    const updateStats = async () => {
+      try {
+        const modifier = PERIODS[selectedPeriod]?.sqlModifier || '-7 days';
+        
+        // Zabezpieczone zapytanie bez bindowania znaku '?'
+        const result = await db.getAllAsync<{ total: number }>(
+          `SELECT SUM(steps) as total FROM daily_steps WHERE date >= date('now', '${modifier}')`
+        );
+        
+        setPeriodTotalSteps(result[0]?.total || 0);
+      } catch (error) {
+        console.error("Błąd podczas przeliczania statystyk: ", error);
+      }
+    };
+
+    updateStats();
+  }, [selectedPeriod, stepCount, isDbReady, db]);
+
+  // Ekran ładowania
   if (!isDbReady) {
     return (
       <View style={styles.container}>
@@ -127,9 +130,10 @@ export default function HomeScreen() {
     );
   }
 
+  // Główny widok
   return (
     <View style={styles.container}>
-      {/* SEKCJA 1: Wynik na żywo (Dzisiaj) */}
+      {/* SEKCJA 1: Wynik na żywo */}
       <View style={styles.todayCard}>
         <Text style={styles.title}>Dzisiejsze kroki</Text>
         <Text style={styles.steps}>{stepCount}</Text>
@@ -140,7 +144,6 @@ export default function HomeScreen() {
       <View style={styles.statsCard}>
         <Text style={styles.statsTitle}>Statystyki Historyczne</Text>
         
-        {/* Rozwijana lista (Picker) */}
         <View style={styles.pickerContainer}>
           <Picker
             selectedValue={selectedPeriod}
@@ -154,7 +157,7 @@ export default function HomeScreen() {
         </View>
 
         <Text style={styles.periodResult}>
-          Suma kroków: <Text style={styles.periodTotal}>{periodTotalSteps + stepCount}</Text>
+          Suma kroków: <Text style={styles.periodTotal}>{periodTotalSteps}</Text>
         </Text>
       </View>
     </View>
@@ -174,8 +177,8 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     alignItems: 'center',
     marginBottom: 20,
-    elevation: 4, // Cień na Androidzie
-    shadowColor: '#000', // Cień na iOS
+    elevation: 4, 
+    shadowColor: '#000', 
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.1,
     shadowRadius: 8,
