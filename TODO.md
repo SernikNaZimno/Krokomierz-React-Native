@@ -10,6 +10,7 @@
   - colorblind mode
   - dev mode
 - [] naprawienie mapy
+- [] zerowanie się licznika po północy
 - [x] zachowywanie danych między sesjami
 - [x] naprawienie liczenia kroków
 - [x] dodanie rozwijanego graphu do statystyk
