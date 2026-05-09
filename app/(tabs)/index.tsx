@@ -1,24 +1,26 @@
-import React, { useState, useEffect } from 'react';
-import { StyleSheet, Text, View, ActivityIndicator } from 'react-native';
+import { Picker } from '@react-native-picker/picker';
 import { Pedometer } from 'expo-sensors';
 import * as SQLite from 'expo-sqlite';
-import { Picker } from '@react-native-picker/picker';
+import React, { useEffect, useState } from 'react';
+import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
 
-// Opcje dla naszej listy rozwijanej
 const PERIODS = {
   WEEK: { label: 'Ostatni Tydzień', sqlModifier: '-7 days' },
   MONTH: { label: 'Ostatni Miesiąc', sqlModifier: '-1 month' },
-  QUARTER: { label: 'Ostatni Kwartał', sqlModifier: '-3 months' },
-  YEAR: { label: 'Ostatni Rok', sqlModifier: '-1 year' },
 };
+
+// Interfejs dla danych z bazy
+interface DailyStats {
+  date: string;
+  total: number;
+}
 
 export default function HomeScreen() {
   const [stepCount, setStepCount] = useState(0);
   const [isPedometerAvailable, setIsPedometerAvailable] = useState('Sprawdzanie...');
   
-  // Stan dla statystyk
   const [selectedPeriod, setSelectedPeriod] = useState<keyof typeof PERIODS>('WEEK');
-  const [historicalSteps, setHistoricalSteps] = useState(0);
+  const [historicalData, setHistoricalData] = useState<DailyStats[]>([]);
   const [isDbReady, setIsDbReady] = useState(false);
   const [db, setDb] = useState<SQLite.SQLiteDatabase | null>(null);
 
@@ -65,7 +67,7 @@ export default function HomeScreen() {
               // Zapis do bazy w czasie rzeczywistym
               try {
                 await db.runAsync(
-                  `INSERT INTO daily_steps (date, steps) VALUES (date('now'), ?)
+                  `INSERT INTO daily_steps (date, steps) VALUES (date('now', 'localtime'), ?)
                    ON CONFLICT(date) DO UPDATE SET steps = ?`,
                   [result.steps, result.steps]
                 );
@@ -91,61 +93,85 @@ export default function HomeScreen() {
     };
   }, [isDbReady, db]);
 
-  // 3. Pobieranie statystyk historycznych (z Debouncem)
+  // 3. Pobieranie danych do wykresu
   useEffect(() => {
     if (!db || !isDbReady) return;
-    
     let isCancelled = false; 
     
     const fetchHistoricalStats = async () => {
       try {
         const modifier = PERIODS[selectedPeriod]?.sqlModifier || '-7 days';
-        
-        const result = await db.getAllAsync<{ total: number }>(
-          `SELECT SUM(steps) as total FROM daily_steps WHERE date >= date('now', '${modifier}') AND date < date('now')`
+        // Grupujemy po dacie, aby uzyskać dane dla każdego słupka wykresu
+        const result = await db.getAllAsync<DailyStats>(
+          `SELECT date, SUM(steps) as total 
+           FROM daily_steps 
+           WHERE date >= date('now', 'localtime', '${modifier}') 
+           GROUP BY date 
+           ORDER BY date ASC`
         );
         
         if (!isCancelled) {
-          setHistoricalSteps(result[0]?.total || 0);
+          setHistoricalData(result);
         }
       } catch (error) {
-        console.error("Błąd podczas przeliczania statystyk: ", error);
+        console.error("Błąd podczas pobierania statystyk: ", error);
       }
     };
 
-    const timeoutId = setTimeout(() => {
-      fetchHistoricalStats();
-    }, 150);
-
+    const timeoutId = setTimeout(fetchHistoricalStats, 150);
     return () => {
       isCancelled = true;
       clearTimeout(timeoutId);
     };
-  }, [selectedPeriod, isDbReady, db]);
+  }, [selectedPeriod, isDbReady, db, stepCount]); // Dodano stepCount do zależności, aby wykres odświeżał się na żywo
 
-  // Ekran ładowania
+  // Funkcja rysująca wykres słupkowy
+  const renderChart = () => {
+    if (historicalData.length === 0) {
+      return <Text style={styles.noDataText}>Brak danych z tego okresu.</Text>;
+    }
+
+    // Znajdujemy maksymalną wartość, aby ustalić proporcje słupków
+    const maxSteps = Math.max(...historicalData.map(d => d.total), 1);
+
+    return (
+      <View style={styles.chartContainer}>
+        {historicalData.slice(-7).map((day, index) => { // Pokazujemy max 7 ostatnich dni dla czytelności
+          const heightPercent = (day.total / maxSteps) * 100;
+          const dateLabel = day.date.substring(5); // Format MM-DD
+          
+          return (
+            <View key={index} style={styles.barWrapper}>
+              <View style={styles.barBackground}>
+                <View style={[styles.barFill, { height: `${heightPercent}%` }]} />
+              </View>
+              <Text style={styles.barLabel}>{dateLabel}</Text>
+            </View>
+          );
+        })}
+      </View>
+    );
+  };
+
   if (!isDbReady) {
     return (
-      <View style={styles.container}>
+      <View style={styles.loaderContainer}>
         <ActivityIndicator size="large" color="#2e8b57" />
-        <Text>Ładowanie bazy danych...</Text>
+        <Text style={{marginTop: 10}}>Ładowanie bazy danych...</Text>
       </View>
     );
   }
 
-  // Główny widok
   return (
     <View style={styles.container}>
-      {/* SEKCJA 1: Wynik na żywo */}
       <View style={styles.todayCard}>
-        <Text style={styles.title}>Dzisiejsze kroki</Text>
+        <Text style={styles.title}>Suma kroków (Dzisiaj)</Text>
         <Text style={styles.steps}>{stepCount}</Text>
-        <Text style={styles.status}>Status czujnika: {isPedometerAvailable}</Text>
+        <Text style={styles.status}>Sensor: {isPedometerAvailable}</Text>
       </View>
 
-      {/* SEKCJA 2: Statystyki historyczne */}
       <View style={styles.statsCard}>
-        <Text style={styles.statsTitle}>Statystyki Historyczne</Text>
+        <Text style={styles.statsTitle}>Historia Aktywności</Text>
         
         <View style={styles.pickerContainer}>
           <Picker
@@ -159,56 +185,85 @@ export default function HomeScreen() {
           </Picker>
         </View>
 
-        <Text style={styles.periodResult}>
-          Suma kroków: <Text style={styles.periodTotal}>{historicalSteps + stepCount}</Text>
-        </Text>
+        {renderChart()}
       </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    padding: 20,
-    backgroundColor: '#f5f5f5',
-    justifyContent: 'center',
-  },
+  container: { flex: 1, padding: 20, backgroundColor: '#f0f4f8', justifyContent: 'center' },
+  loaderContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  
   todayCard: {
     backgroundColor: '#fff',
     padding: 30,
-    borderRadius: 20,
+    borderRadius: 24,
     alignItems: 'center',
     marginBottom: 20,
-    elevation: 4, 
+    elevation: 6, 
     shadowColor: '#000', 
-    shadowOffset: { width: 0, height: 2 },
+    shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.1,
-    shadowRadius: 8,
+    shadowRadius: 12,
   },
-  title: { fontSize: 20, color: '#666' },
-  steps: { fontSize: 72, fontWeight: 'bold', color: '#2e8b57', marginVertical: 10 },
-  status: { fontSize: 12, color: '#999' },
+  title: { fontSize: 18, color: '#64748b', fontWeight: '500' },
+  steps: { fontSize: 84, fontWeight: '800', color: '#10b981', marginVertical: 10, letterSpacing: -2 },
+  status: { fontSize: 12, color: '#94a3b8', textTransform: 'uppercase', fontWeight: '600' },
   
   statsCard: {
     backgroundColor: '#fff',
-    padding: 20,
-    borderRadius: 20,
-    elevation: 4,
+    padding: 24,
+    borderRadius: 24,
+    elevation: 6,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
+    shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.1,
-    shadowRadius: 8,
+    shadowRadius: 12,
   },
-  statsTitle: { fontSize: 18, fontWeight: '600', marginBottom: 15, textAlign: 'center' },
+  statsTitle: { fontSize: 18, fontWeight: '700', marginBottom: 15, textAlign: 'center', color: '#1e293b' },
   pickerContainer: {
-    borderWidth: 1,
-    borderColor: '#ddd',
-    borderRadius: 10,
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
     overflow: 'hidden',
     marginBottom: 20,
   },
   picker: { height: 50, width: '100%' },
-  periodResult: { fontSize: 16, textAlign: 'center', color: '#555' },
-  periodTotal: { fontSize: 24, fontWeight: 'bold', color: '#333' },
+  
+  // Style Wykresu
+  chartContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-end',
+    height: 150,
+    paddingTop: 10,
+  },
+  barWrapper: {
+    alignItems: 'center',
+    flex: 1,
+  },
+  barBackground: {
+    width: 20,
+    height: 120,
+    backgroundColor: '#e2e8f0',
+    borderRadius: 10,
+    justifyContent: 'flex-end',
+    overflow: 'hidden',
+  },
+  barFill: {
+    width: '100%',
+    backgroundColor: '#3b82f6',
+    borderRadius: 10,
+  },
+  barLabel: {
+    fontSize: 10,
+    color: '#64748b',
+    marginTop: 8,
+  },
+  noDataText: {
+    textAlign: 'center',
+    color: '#94a3b8',
+    fontStyle: 'italic',
+    paddingVertical: 30,
+  }
 });

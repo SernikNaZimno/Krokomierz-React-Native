@@ -1,8 +1,9 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { StyleSheet, View, ActivityIndicator } from 'react-native';
-import MapView, { Marker, Polygon, UrlTile } from 'react-native-maps';
+import { FontAwesome5 } from '@expo/vector-icons';
 import * as Location from 'expo-location';
 import * as SQLite from 'expo-sqlite';
+import React, { useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, StyleSheet, View } from 'react-native';
+import MapView, { Marker, Polygon, UrlTile } from 'react-native-maps';
 
 // --------------------------------------------------
 // LOGIKA SIATKI I MGŁY WOJNY
@@ -153,7 +154,11 @@ export default function ExploreScreen() {
         />
         
         {location && (
-          <Marker coordinate={location} title="Tu jesteś" />
+          <Marker coordinate={location} title="Twoja pozycja">
+            <View style={styles.userMarker}>
+              <FontAwesome5 name="walking" size={20} color="#fff" />
+            </View>
+          </Marker>
         )}
       </MapView>
     </View>
@@ -162,5 +167,20 @@ export default function ExploreScreen() {
 
 const styles = StyleSheet.create({ 
   container: { flex: 1 }, 
-  map: { width: '100%', height: '100%' } 
+  map: { width: '100%', height: '100%' },
+  userMarker: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#3b82f6',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 3,
+    borderColor: '#ffffff',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 3,
+    elevation: 5,
+  }
 });
