@@ -18,7 +18,6 @@ export default function HomeScreen() {
   
   // Stan dla statystyk
   const [selectedPeriod, setSelectedPeriod] = useState<keyof typeof PERIODS>('WEEK');
-  // Zastąpiliśmy stare periodTotalSteps nową zmienną historicalSteps
   const [historicalSteps, setHistoricalSteps] = useState(0);
   const [isDbReady, setIsDbReady] = useState(false);
   const [db, setDb] = useState<SQLite.SQLiteDatabase | null>(null);
