@@ -2,6 +2,9 @@
 
 This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
 
+Make sure that you are using java between 17 and 21.
+Works best when tested on a device connected to computer (server) via ip
+
 ## Get started
 
 1. Install dependencies
@@ -13,8 +16,12 @@ This is an [Expo](https://expo.dev) project created with [`create-expo-app`](htt
 2. Start the app
 
    ```bash
-   npx expo start
+   npx expo start <--- Depricated
    ```
+
+   Current:
+   & "C:\Users\[USER]\AppData\Local\Android\Sdk\platform-tools\adb.exe" connect USER_PHONE_IP:USER_PHONE_PORT
+   npx expo run:android
 
 In the output, you'll find options to open the app in a
 
