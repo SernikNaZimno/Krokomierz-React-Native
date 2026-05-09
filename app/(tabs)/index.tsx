@@ -1,17 +1,19 @@
-import { Picker } from '@react-native-picker/picker';
+import React, { useState, useEffect } from 'react';
+import { StyleSheet, Text, View, ActivityIndicator, ScrollView } from 'react-native';
 import { Pedometer } from 'expo-sensors';
 import * as SQLite from 'expo-sqlite';
-import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
+import { Picker } from '@react-native-picker/picker';
 
+// Tryb 'daily' pokazuje każdy dzień, 'monthly' grupuje dni w miesiące
 const PERIODS = {
-  WEEK: { label: 'Ostatni Tydzień', sqlModifier: '-7 days' },
-  MONTH: { label: 'Ostatni Miesiąc', sqlModifier: '-1 month' },
+  WEEK: { label: 'Ostatni Tydzień', sqlModifier: '-7 days', mode: 'daily' },
+  MONTH: { label: 'Ostatni Miesiąc', sqlModifier: '-1 month', mode: 'daily' },
+  QUARTER: { label: 'Ostatni Kwartał', sqlModifier: '-3 months', mode: 'daily' },
+  YEAR: { label: 'Ostatni Rok', sqlModifier: '-1 year', mode: 'monthly' },
 };
 
-// Interfejs dla danych z bazy
-interface DailyStats {
-  date: string;
+interface ChartData {
+  label: string;
   total: number;
 }
 
@@ -20,9 +22,10 @@ export default function HomeScreen() {
   const [isPedometerAvailable, setIsPedometerAvailable] = useState('Sprawdzanie...');
   
   const [selectedPeriod, setSelectedPeriod] = useState<keyof typeof PERIODS>('WEEK');
-  const [historicalData, setHistoricalData] = useState<DailyStats[]>([]);
+  const [historicalData, setHistoricalData] = useState<ChartData[]>([]);
   const [isDbReady, setIsDbReady] = useState(false);
   const [db, setDb] = useState<SQLite.SQLiteDatabase | null>(null);
+  const [isLoadingChart, setIsLoadingChart] = useState(false);
 
   // 1. Inicjalizacja Bazy Danych
   useEffect(() => {
@@ -30,134 +33,186 @@ export default function HomeScreen() {
       try {
         const database = await SQLite.openDatabaseAsync('krokomierz.db');
         setDb(database);
-
         await database.execAsync(`
           CREATE TABLE IF NOT EXISTS daily_steps (
             date TEXT PRIMARY KEY,
             steps INTEGER
           );
         `);
-
         setIsDbReady(true);
       } catch (error) {
-        console.error("Błąd inicjalizacji bazy danych: ", error);
+        console.error("Błąd bazy danych: ", error);
       }
     };
-
     setupDatabase();
   }, []);
 
-  // 2. Obsługa Krokomierza i zapis na żywo
+  // 2. Obsługa Krokomierza
   useEffect(() => {
     if (!isDbReady || !db) return;
-
     let subscription: Pedometer.Subscription | null = null;
+    let retryCount = 0;
+    const maxRetries = 3;
 
     const startPedometer = async () => {
       try {
-        const permission = await Pedometer.requestPermissionsAsync();
-        if (permission.granted) {
-          const isAvailable = await Pedometer.isAvailableAsync();
-          setIsPedometerAvailable(isAvailable ? 'Dostępny' : 'Brak sprzętu');
+        // Check status najpierw
+        const isAvailable = await Pedometer.isAvailableAsync();
+        
+        if (!isAvailable) {
+          setIsPedometerAvailable('Brak sprzętu');
+          return;
+        }
 
-          if (isAvailable) {
-            subscription = Pedometer.watchStepCount(async (result) => {
-              setStepCount(result.steps);
-              
-              // Zapis do bazy w czasie rzeczywistym
-              try {
-                await db.runAsync(
-                  `INSERT INTO daily_steps (date, steps) VALUES (date('now', 'localtime'), ?)
-                   ON CONFLICT(date) DO UPDATE SET steps = ?`,
-                  [result.steps, result.steps]
-                );
-              } catch (err) {
-                console.error("Błąd zapisu kroków: ", err);
-              }
-            });
-          }
+        // Request permissions z retry logiką
+        let permission = await Pedometer.requestPermissionsAsync();
+        
+        while (!permission.granted && retryCount < maxRetries) {
+          retryCount++;
+          console.warn(`Retry uprawnień (${retryCount}/${maxRetries})`);
+          await new Promise(resolve => setTimeout(resolve, 500));
+          permission = await Pedometer.requestPermissionsAsync();
+        }
+
+        if (permission.granted) {
+          setIsPedometerAvailable('Dostępny');
+          subscription = Pedometer.watchStepCount(async (result) => {
+            setStepCount(result.steps);
+            try {
+              await db.runAsync(
+                `INSERT INTO daily_steps (date, steps) VALUES (date('now', 'localtime'), ?)
+                 ON CONFLICT(date) DO UPDATE SET steps = ?`,
+                [result.steps, result.steps]
+              );
+            } catch (err) {
+              console.log("Błąd zapisu: ", err);
+            }
+          });
         } else {
           setIsPedometerAvailable('Brak uprawnień');
         }
       } catch (error) {
-        console.error("Błąd krokomierza: ", error);
+        console.error("Błąd czujnika: ", error);
+        setIsPedometerAvailable('Błąd czujnika');
       }
     };
 
     startPedometer();
-
     return () => {
-      if (subscription) {
-        subscription.remove();
-      }
+      if (subscription) subscription.remove();
     };
   }, [isDbReady, db]);
 
-  // 3. Pobieranie danych do wykresu
+  // 3. Pobieranie danych do wykresu (Stabilna obsługa bez crashów)
   useEffect(() => {
     if (!db || !isDbReady) return;
-    let isCancelled = false; 
+    let isCancelled = false;
+    let timeoutId: NodeJS.Timeout;
     
     const fetchHistoricalStats = async () => {
+      if (isCancelled) return;
+      
+      setIsLoadingChart(true);
       try {
-        const modifier = PERIODS[selectedPeriod]?.sqlModifier || '-7 days';
-        // Grupujemy po dacie, aby uzyskać dane dla każdego słupka wykresu
-        const result = await db.getAllAsync<DailyStats>(
-          `SELECT date, SUM(steps) as total 
-           FROM daily_steps 
-           WHERE date >= date('now', 'localtime', '${modifier}') 
-           GROUP BY date 
-           ORDER BY date ASC`
-        );
+        const periodConfig = PERIODS[selectedPeriod];
+        let query = '';
+
+        // Sprytne grupowanie: jeśli wybraliśmy rok, grupujemy po miesiącu (np. 2023-10)
+        if (periodConfig.mode === 'monthly') {
+          query = `
+            SELECT strftime('%Y-%m', date) as label, SUM(steps) as total 
+            FROM daily_steps 
+            WHERE date >= date('now', 'localtime', '${periodConfig.sqlModifier}') 
+            GROUP BY label 
+            ORDER BY label ASC
+          `;
+        } else {
+          query = `
+            SELECT date as label, SUM(steps) as total 
+            FROM daily_steps 
+            WHERE date >= date('now', 'localtime', '${periodConfig.sqlModifier}') 
+            GROUP BY label 
+            ORDER BY label ASC
+          `;
+        }
         
-        if (!isCancelled) {
-          setHistoricalData(result);
+        const result = await db.getAllAsync<ChartData>(query);
+        
+        if (!isCancelled && result) {
+          setHistoricalData(result || []);
         }
       } catch (error) {
-        console.error("Błąd podczas pobierania statystyk: ", error);
+        if (!isCancelled) {
+          console.error("Błąd statystyk: ", error);
+          setHistoricalData([]);
+        }
+      } finally {
+        if (!isCancelled) {
+          setIsLoadingChart(false);
+        }
       }
     };
 
-    const timeoutId = setTimeout(fetchHistoricalStats, 150);
-    return () => {
+    // Debounce 500ms + longer timeout to prevent query stacking
+    timeoutId = setTimeout(fetchHistoricalStats, 500);
+    
+    return () => { 
       isCancelled = true;
       clearTimeout(timeoutId);
     };
-  }, [selectedPeriod, isDbReady, db, stepCount]); // Dodano stepCount do zależności, aby wykres odświeżał się na żywo
+  }, [selectedPeriod, isDbReady, db]);
 
-  // Funkcja rysująca wykres słupkowy
+  // 4. Renderowanie wykresu Garmin-style
   const renderChart = () => {
-    if (historicalData.length === 0) {
-      return <Text style={styles.noDataText}>Brak danych z tego okresu.</Text>;
+    if (isLoadingChart) {
+      return (
+        <View style={styles.chartLoadingContainer}>
+          <ActivityIndicator size="small" color="#3b82f6" />
+          <Text style={styles.loadingText}>Ładowanie wykresu...</Text>
+        </View>
+      );
     }
 
-    // Znajdujemy maksymalną wartość, aby ustalić proporcje słupków
-    const maxSteps = Math.max(...historicalData.map(d => d.total), 1);
+    if (historicalData.length === 0) {
+      return <Text style={styles.noDataText}>Brak aktywności w tym okresie.</Text>;
+    }
+
+    // Używamy reduce zamiast Math.max(...array) co zapobiega crashom przy dużych zakresach danych
+    const maxSteps = historicalData.reduce((max, day) => Math.max(max, day.total), 1);
 
     return (
-      <View style={styles.chartContainer}>
-        {historicalData.slice(-7).map((day, index) => { // Pokazujemy max 7 ostatnich dni dla czytelności
-          const heightPercent = (day.total / maxSteps) * 100;
-          const dateLabel = day.date.substring(5); // Format MM-DD
-          
+      <ScrollView 
+        horizontal 
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={styles.chartScrollContainer}
+      >
+        {historicalData.map((data, index) => {
+          const heightPercent = (data.total / maxSteps) * 100;
+          // Usuwamy rok z etykiety dla lepszej czytelności (zostaje MM-DD lub MM)
+          const displayLabel = data.label.substring(5); 
+
           return (
             <View key={index} style={styles.barWrapper}>
               <View style={styles.barBackground}>
-                <View style={[styles.barFill, { height: `${heightPercent}%` }]} />
+                {/* Warunek heightPercent > 0 usuwa "ducha-słupka" */}
+                {heightPercent > 0 && (
+                  <View style={[styles.barFill, { height: `${heightPercent}%` }]} />
+                )}
               </View>
-              <Text style={styles.barLabel}>{dateLabel}</Text>
+              <Text style={styles.barLabel}>{displayLabel}</Text>
+              <Text style={styles.barValue}>{data.total > 0 ? data.total : ''}</Text>
             </View>
           );
         })}
-      </View>
+      </ScrollView>
     );
   };
 
   if (!isDbReady) {
     return (
-      <View style={styles.loaderContainer}>
+      <View style={[styles.container, styles.center]}>
         <ActivityIndicator size="large" color="#2e8b57" />
-        <Text style={{marginTop: 10}}>Ładowanie bazy danych...</Text>
+        <Text style={{marginTop: 10}}>Inicjalizacja...</Text>
       </View>
     );
   }
@@ -193,7 +248,7 @@ export default function HomeScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, padding: 20, backgroundColor: '#f0f4f8', justifyContent: 'center' },
-  loaderContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  center: { alignItems: 'center' },
   
   todayCard: {
     backgroundColor: '#fff',
@@ -202,13 +257,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 20,
     elevation: 6, 
-    shadowColor: '#000', 
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.1,
-    shadowRadius: 12,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.1, shadowRadius: 12,
   },
   title: { fontSize: 18, color: '#64748b', fontWeight: '500' },
-  steps: { fontSize: 84, fontWeight: '800', color: '#10b981', marginVertical: 10, letterSpacing: -2 },
+  steps: { fontSize: 84, fontWeight: '800', color: '#10b981', marginVertical: 10 },
   status: { fontSize: 12, color: '#94a3b8', textTransform: 'uppercase', fontWeight: '600' },
   
   statsCard: {
@@ -216,54 +268,54 @@ const styles = StyleSheet.create({
     padding: 24,
     borderRadius: 24,
     elevation: 6,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.1,
-    shadowRadius: 12,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.1, shadowRadius: 12,
   },
   statsTitle: { fontSize: 18, fontWeight: '700', marginBottom: 15, textAlign: 'center', color: '#1e293b' },
   pickerContainer: {
     backgroundColor: '#f8fafc',
     borderRadius: 12,
     overflow: 'hidden',
-    marginBottom: 20,
+    marginBottom: 10,
   },
   picker: { height: 50, width: '100%' },
   
-  // Style Wykresu
-  chartContainer: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
+  // Style przewijanego wykresu (Garmin/Apple Health style)
+  chartScrollContainer: {
     alignItems: 'flex-end',
-    height: 150,
-    paddingTop: 10,
+    height: 180,
+    paddingTop: 20,
+    paddingBottom: 10,
+  },
+  chartLoadingContainer: {
+    height: 180,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingVertical: 20,
+  },
+  loadingText: {
+    marginTop: 8,
+    fontSize: 12,
+    color: '#94a3b8',
   },
   barWrapper: {
     alignItems: 'center',
-    flex: 1,
+    marginHorizontal: 8,
+    width: 36,
   },
   barBackground: {
-    width: 20,
+    width: 24,
     height: 120,
     backgroundColor: '#e2e8f0',
-    borderRadius: 10,
+    borderRadius: 12,
     justifyContent: 'flex-end',
     overflow: 'hidden',
   },
   barFill: {
     width: '100%',
     backgroundColor: '#3b82f6',
-    borderRadius: 10,
+    borderRadius: 12,
   },
-  barLabel: {
-    fontSize: 10,
-    color: '#64748b',
-    marginTop: 8,
-  },
-  noDataText: {
-    textAlign: 'center',
-    color: '#94a3b8',
-    fontStyle: 'italic',
-    paddingVertical: 30,
-  }
+  barLabel: { fontSize: 11, color: '#64748b', marginTop: 8, fontWeight: '600' },
+  barValue: { fontSize: 9, color: '#94a3b8', position: 'absolute', top: -15, fontWeight: 'bold' },
+  noDataText: { textAlign: 'center', color: '#94a3b8', fontStyle: 'italic', paddingVertical: 40 }
 });
