@@ -5,6 +5,8 @@ This is an [Expo](https://expo.dev) project created with [`create-expo-app`](htt
 Make sure that you are using java between 17 and 21.
 Works best when tested on a device connected to computer (server) via ip
 
+Before starting, remember to have wireless/USB debugging turned on.
+
 ## Get started
 
 1. Install dependencies

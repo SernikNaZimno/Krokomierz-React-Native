@@ -1,19 +1,29 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { StyleSheet, Text, View, ActivityIndicator, ScrollView, TextInput, TouchableOpacity } from 'react-native';
-import { Pedometer } from 'expo-sensors';
-import * as SQLite from 'expo-sqlite';
-import { Picker } from '@react-native-picker/picker';
-import { FontAwesome5 } from '@expo/vector-icons';
+import { FontAwesome5 } from "@expo/vector-icons";
+import { Picker } from "@react-native-picker/picker";
+import { Pedometer } from "expo-sensors";
+import * as SQLite from "expo-sqlite";
+import React, { useEffect, useRef, useState } from "react";
+import {
+  ActivityIndicator,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
 
 const PERIODS = {
-  WEEK: { label: 'Ostatni Tydzień', sqlModifier: '-7 days', mode: 'daily' },
-  MONTH: { label: 'Ostatni Miesiąc', sqlModifier: '-1 month', mode: 'daily' },
-  QUARTER: { label: 'Ostatni Kwartał', sqlModifier: '-3 months', mode: 'daily' },
-  YEAR: { label: 'Ostatni Rok', sqlModifier: '-1 year', mode: 'monthly' },
+  WEEK: { label: "Ostatni Tydzień", sqlModifier: "-7 days", mode: "daily" },
+  MONTH: { label: "Ostatni Miesiąc", sqlModifier: "-1 month", mode: "daily" },
+  QUARTER: {
+    label: "Ostatni Kwartał",
+    sqlModifier: "-3 months",
+    mode: "daily",
+  },
+  YEAR: { label: "Ostatni Rok", sqlModifier: "-1 year", mode: "monthly" },
 };
 
-const STEP_LENGTH_M = 0.762; // Średnia długość kroku w metrach
-const KCAL_PER_STEP = 0.04;  // Średnia ilość spalanych kalorii na krok
+const STEP_LENGTH_M = 0.762;
+const KCAL_PER_STEP = 0.04;
 
 interface ChartData {
   label: string;
@@ -21,23 +31,26 @@ interface ChartData {
 }
 
 export default function HomeScreen() {
-  // Stan Krokomierza i Statystyk
   const [sessionSteps, setSessionSteps] = useState(0);
   const [savedTodaySteps, setSavedTodaySteps] = useState(0);
-  const [isPedometerAvailable, setIsPedometerAvailable] = useState('Sprawdzanie...');
-  
-  // Cele i Ustawienia
+  const [isPedometerAvailable, setIsPedometerAvailable] =
+    useState("Sprawdzanie...");
+
   const [dailyGoal, setDailyGoal] = useState(10000);
-  
-  // Stan Wykresu i Bazy
-  const [selectedPeriod, setSelectedPeriod] = useState<keyof typeof PERIODS>('WEEK');
+
+  const [selectedPeriod, setSelectedPeriod] =
+    useState<keyof typeof PERIODS>("WEEK");
   const [historicalData, setHistoricalData] = useState<ChartData[]>([]);
   const [isDbReady, setIsDbReady] = useState(false);
   const [db, setDb] = useState<SQLite.SQLiteDatabase | null>(null);
   const [isLoadingChart, setIsLoadingChart] = useState(false);
 
-  // Zmienna chroniąca przed "wyścigami" zapytań (Race conditions)
   const queryVersion = useRef(0);
+
+  // === SYSTEM RESETOWANIA DNI ===
+  const currentDayRef = useRef(new Date().toDateString());
+  const sessionOffsetRef = useRef(0);
+  const savedTodayStepsRef = useRef(0);
 
   const totalStepsToday = savedTodaySteps + sessionSteps;
   const distanceKm = ((totalStepsToday * STEP_LENGTH_M) / 1000).toFixed(2);
@@ -48,7 +61,7 @@ export default function HomeScreen() {
   useEffect(() => {
     const setupDatabase = async () => {
       try {
-        const database = await SQLite.openDatabaseAsync('krokomierz.db');
+        const database = await SQLite.openDatabaseAsync("krokomierz.db");
         setDb(database);
         await database.execAsync(`
           CREATE TABLE IF NOT EXISTS daily_steps (
@@ -64,51 +77,79 @@ export default function HomeScreen() {
     setupDatabase();
   }, []);
 
-  // 2. Obsługa Krokomierza
+  // 2. Obsługa Krokomierza i Weryfikacja Daty
   useEffect(() => {
     if (!isDbReady || !db) return;
     let subscription: Pedometer.Subscription | null = null;
 
     const startPedometer = async () => {
       try {
-        // Wczytanie kroków z dzisiaj przy uruchomieniu
+        // Zawsze pobieramy stan na dzisiaj (gdybyśmy wyłączyli apkę w połowie dnia)
         const todayRecord = await db.getFirstAsync<{ steps: number }>(
-          `SELECT steps FROM daily_steps WHERE date = date('now', 'localtime')`
+          `SELECT steps FROM daily_steps WHERE date = date('now', 'localtime')`,
         );
-        if (todayRecord) setSavedTodaySteps(todayRecord.steps);
+
+        if (todayRecord) {
+          setSavedTodaySteps(todayRecord.steps);
+          savedTodayStepsRef.current = todayRecord.steps;
+        } else {
+          setSavedTodaySteps(0);
+          savedTodayStepsRef.current = 0;
+        }
 
         const isAvailable = await Pedometer.isAvailableAsync();
         if (!isAvailable) {
-          setIsPedometerAvailable('Brak sprzętu');
+          setIsPedometerAvailable("Brak sprzętu");
           return;
         }
 
         const permission = await Pedometer.requestPermissionsAsync();
-        
+
         if (permission.granted) {
-          setIsPedometerAvailable('Dostępny');
-          
+          setIsPedometerAvailable("Dostępny");
+
           subscription = Pedometer.watchStepCount(async (result) => {
-            setSessionSteps(result.steps);
-            const currentTotal = (todayRecord ? todayRecord.steps : 0) + result.steps;
-            
+            const todayStr = new Date().toDateString();
+
+            // --- LOGIKA RESETU (wykrywa czy zegar wybił północ) ---
+            if (todayStr !== currentDayRef.current) {
+              currentDayRef.current = todayStr;
+              sessionOffsetRef.current = result.steps; // Zapisujemy "bagaż" wczorajszych kroków
+
+              setSavedTodaySteps(0);
+              savedTodayStepsRef.current = 0;
+            }
+
+            // Odejmujemy "bagaż" od aktualnego stanu czujnika
+            let todaySessionSteps = result.steps - sessionOffsetRef.current;
+
+            // Zabezpieczenie przed ewentualnym ujemnym błędem (np. nagły restart samego Androida)
+            if (todaySessionSteps < 0) {
+              sessionOffsetRef.current = 0;
+              todaySessionSteps = result.steps;
+            }
+
+            setSessionSteps(todaySessionSteps);
+
+            const currentTotal = savedTodayStepsRef.current + todaySessionSteps;
+
+            // Zapisz połączone kroki do bezpiecznej bazy SQLite
             try {
-              // Zapisujemy połączone kroki (z bazy + z obecnej sesji)
               await db.runAsync(
                 `INSERT INTO daily_steps (date, steps) VALUES (date('now', 'localtime'), ?)
                  ON CONFLICT(date) DO UPDATE SET steps = ?`,
-                [currentTotal, currentTotal]
+                [currentTotal, currentTotal],
               );
             } catch (err) {
               console.log("Błąd zapisu: ", err);
             }
           });
         } else {
-          setIsPedometerAvailable('Brak uprawnień');
+          setIsPedometerAvailable("Brak uprawnień");
         }
       } catch (error) {
         console.error("Błąd czujnika: ", error);
-        setIsPedometerAvailable('Błąd czujnika');
+        setIsPedometerAvailable("Błąd czujnika");
       }
     };
 
@@ -118,20 +159,20 @@ export default function HomeScreen() {
     };
   }, [isDbReady, db]);
 
-  // 3. Pobieranie danych do wykresu (Odporne na crashe i szybkie kliknięcia)
+  // 3. Pobieranie danych do wykresu (Odporne na "wyścigi" zapytań)
   useEffect(() => {
     if (!db || !isDbReady) return;
-    
+
     queryVersion.current += 1;
     const currentVersion = queryVersion.current;
-    
+
     const fetchHistoricalStats = async () => {
       setIsLoadingChart(true);
       try {
         const periodConfig = PERIODS[selectedPeriod];
-        let query = '';
+        let query = "";
 
-        if (periodConfig.mode === 'monthly') {
+        if (periodConfig.mode === "monthly") {
           query = `
             SELECT strftime('%Y-%m', date) as label, SUM(steps) as total 
             FROM daily_steps 
@@ -148,10 +189,9 @@ export default function HomeScreen() {
             ORDER BY label ASC
           `;
         }
-        
+
         const result = await db.getAllAsync<ChartData>(query);
-        
-        // Aktualizujemy stan TYLKO jeśli to zapytanie jest nadal najnowsze
+
         if (currentVersion === queryVersion.current) {
           setHistoricalData(result || []);
         }
@@ -162,9 +202,9 @@ export default function HomeScreen() {
       }
     };
 
-    const timeoutId = setTimeout(fetchHistoricalStats, 300); // Delikatny debounce
+    const timeoutId = setTimeout(fetchHistoricalStats, 300);
     return () => clearTimeout(timeoutId);
-  }, [selectedPeriod, isDbReady, db, totalStepsToday]); // totalStepsToday odświeża wykres na żywo
+  }, [selectedPeriod, isDbReady, db, totalStepsToday]);
 
   // 4. Renderowanie Wykresu
   const renderChart = () => {
@@ -177,28 +217,40 @@ export default function HomeScreen() {
     }
 
     if (historicalData.length === 0) {
-      return <Text style={styles.noDataText}>Brak aktywności w tym okresie.</Text>;
+      return (
+        <Text style={styles.noDataText}>Brak aktywności w tym okresie.</Text>
+      );
     }
 
-    // Bezpieczne sprawdzanie MAX - zapobiega crashom gdy total to null/undefined
-    const maxSteps = historicalData.reduce((max, day) => Math.max(max, Number(day.total) || 0), 1);
+    const maxSteps = historicalData.reduce(
+      (max, day) => Math.max(max, Number(day.total) || 0),
+      1,
+    );
 
     return (
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chartScrollContainer}>
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={styles.chartScrollContainer}
+      >
         {historicalData.map((data, index) => {
           const safeTotal = Number(data.total) || 0;
           const heightPercent = (safeTotal / maxSteps) * 100;
-          const displayLabel = data.label.substring(5); 
+          const displayLabel = data.label.substring(5);
 
           return (
             <View key={index} style={styles.barWrapper}>
               <View style={styles.barBackground}>
                 {heightPercent > 0 && (
-                  <View style={[styles.barFill, { height: `${heightPercent}%` }]} />
+                  <View
+                    style={[styles.barFill, { height: `${heightPercent}%` }]}
+                  />
                 )}
               </View>
               <Text style={styles.barLabel}>{displayLabel}</Text>
-              <Text style={styles.barValue}>{safeTotal > 0 ? safeTotal : ''}</Text>
+              <Text style={styles.barValue}>
+                {safeTotal > 0 ? safeTotal : ""}
+              </Text>
             </View>
           );
         })}
@@ -215,21 +267,24 @@ export default function HomeScreen() {
   }
 
   return (
-    <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 40 }}>
+    <ScrollView
+      style={styles.container}
+      contentContainerStyle={{ paddingBottom: 40 }}
+    >
       {/* Sekcja Dzisiejsza */}
       <View style={styles.todayCard}>
         <Text style={styles.title}>Dzisiejsza Aktywność</Text>
-        
-        {/* Progress Bar i Kroki */}
+
         <View style={styles.progressCircleContainer}>
           <Text style={styles.steps}>{totalStepsToday}</Text>
           <Text style={styles.goalText}>/ {dailyGoal} kroków</Text>
           <View style={styles.progressBarBackground}>
-            <View style={[styles.progressBarFill, { width: `${progressPercent}%` }]} />
+            <View
+              style={[styles.progressBarFill, { width: `${progressPercent}%` }]}
+            />
           </View>
         </View>
 
-        {/* Statystyki: Dystans i Kalorie */}
         <View style={styles.statsRow}>
           <View style={styles.statBox}>
             <FontAwesome5 name="route" size={20} color="#3b82f6" />
@@ -240,8 +295,10 @@ export default function HomeScreen() {
             <Text style={styles.statValue}>{burnedKcal} kcal</Text>
           </View>
         </View>
-        
-        <Text style={styles.status}>Status czujnika: {isPedometerAvailable}</Text>
+
+        <Text style={styles.status}>
+          Status czujnika: {isPedometerAvailable}
+        </Text>
       </View>
 
       {/* Sekcja Wykresu */}
@@ -250,7 +307,9 @@ export default function HomeScreen() {
         <View style={styles.pickerContainer}>
           <Picker
             selectedValue={selectedPeriod}
-            onValueChange={(itemValue) => setSelectedPeriod(itemValue as keyof typeof PERIODS)}
+            onValueChange={(itemValue) =>
+              setSelectedPeriod(itemValue as keyof typeof PERIODS)
+            }
             style={styles.picker}
           >
             {Object.entries(PERIODS).map(([key, data]) => (
@@ -265,48 +324,144 @@ export default function HomeScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#f0f4f8', padding: 15 },
-  center: { justifyContent: 'center', alignItems: 'center' },
-  
+  container: { flex: 1, backgroundColor: "#f0f4f8", padding: 15 },
+  center: { justifyContent: "center", alignItems: "center" },
+
   todayCard: {
-    backgroundColor: '#fff',
+    backgroundColor: "#fff",
     padding: 25,
     borderRadius: 24,
-    alignItems: 'center',
+    alignItems: "center",
     marginBottom: 20,
     marginTop: 20,
-    elevation: 6, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.1, shadowRadius: 12,
+    elevation: 6,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.1,
+    shadowRadius: 12,
   },
-  title: { fontSize: 18, color: '#64748b', fontWeight: '700', marginBottom: 15 },
-  
-  progressCircleContainer: { alignItems: 'center', width: '100%', marginBottom: 25 },
-  steps: { fontSize: 64, fontWeight: '800', color: '#10b981', letterSpacing: -2 },
-  goalText: { fontSize: 16, color: '#94a3b8', fontWeight: '600', marginBottom: 15 },
-  progressBarBackground: { width: '100%', height: 12, backgroundColor: '#e2e8f0', borderRadius: 10, overflow: 'hidden' },
-  progressBarFill: { height: '100%', backgroundColor: '#10b981', borderRadius: 10 },
+  title: {
+    fontSize: 18,
+    color: "#64748b",
+    fontWeight: "700",
+    marginBottom: 15,
+  },
 
-  statsRow: { flexDirection: 'row', justifyContent: 'space-around', width: '100%', marginBottom: 20 },
-  statBox: { alignItems: 'center', backgroundColor: '#f8fafc', padding: 15, borderRadius: 16, width: '45%' },
-  statValue: { fontSize: 18, fontWeight: '700', color: '#1e293b', marginTop: 8 },
-  
-  status: { fontSize: 11, color: '#cbd5e1', textTransform: 'uppercase', fontWeight: '600' },
-  
+  progressCircleContainer: {
+    alignItems: "center",
+    width: "100%",
+    marginBottom: 25,
+  },
+  steps: {
+    fontSize: 64,
+    fontWeight: "800",
+    color: "#10b981",
+    letterSpacing: -2,
+  },
+  goalText: {
+    fontSize: 16,
+    color: "#94a3b8",
+    fontWeight: "600",
+    marginBottom: 15,
+  },
+  progressBarBackground: {
+    width: "100%",
+    height: 12,
+    backgroundColor: "#e2e8f0",
+    borderRadius: 10,
+    overflow: "hidden",
+  },
+  progressBarFill: {
+    height: "100%",
+    backgroundColor: "#10b981",
+    borderRadius: 10,
+  },
+
+  statsRow: {
+    flexDirection: "row",
+    justifyContent: "space-around",
+    width: "100%",
+    marginBottom: 20,
+  },
+  statBox: {
+    alignItems: "center",
+    backgroundColor: "#f8fafc",
+    padding: 15,
+    borderRadius: 16,
+    width: "45%",
+  },
+  statValue: {
+    fontSize: 18,
+    fontWeight: "700",
+    color: "#1e293b",
+    marginTop: 8,
+  },
+
+  status: {
+    fontSize: 11,
+    color: "#cbd5e1",
+    textTransform: "uppercase",
+    fontWeight: "600",
+  },
+
   statsCard: {
-    backgroundColor: '#fff',
+    backgroundColor: "#fff",
     padding: 24,
     borderRadius: 24,
-    elevation: 6, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.1, shadowRadius: 12,
+    elevation: 6,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.1,
+    shadowRadius: 12,
   },
-  statsTitle: { fontSize: 18, fontWeight: '700', marginBottom: 15, textAlign: 'center', color: '#1e293b' },
-  pickerContainer: { backgroundColor: '#f8fafc', borderRadius: 12, overflow: 'hidden', marginBottom: 10 },
-  picker: { height: 50, width: '100%' },
-  
-  chartScrollContainer: { alignItems: 'flex-end', height: 180, paddingTop: 20, paddingBottom: 10 },
-  chartLoadingContainer: { height: 180, justifyContent: 'center', alignItems: 'center' },
-  barWrapper: { alignItems: 'center', marginHorizontal: 8, width: 36 },
-  barBackground: { width: 24, height: 120, backgroundColor: '#e2e8f0', borderRadius: 12, justifyContent: 'flex-end', overflow: 'hidden' },
-  barFill: { width: '100%', backgroundColor: '#3b82f6', borderRadius: 12 },
-  barLabel: { fontSize: 11, color: '#64748b', marginTop: 8, fontWeight: '600' },
-  barValue: { fontSize: 9, color: '#94a3b8', position: 'absolute', top: -15, fontWeight: 'bold' },
-  noDataText: { textAlign: 'center', color: '#94a3b8', fontStyle: 'italic', paddingVertical: 40 }
+  statsTitle: {
+    fontSize: 18,
+    fontWeight: "700",
+    marginBottom: 15,
+    textAlign: "center",
+    color: "#1e293b",
+  },
+  pickerContainer: {
+    backgroundColor: "#f8fafc",
+    borderRadius: 12,
+    overflow: "hidden",
+    marginBottom: 10,
+  },
+  picker: { height: 50, width: "100%" },
+
+  chartScrollContainer: {
+    alignItems: "flex-end",
+    height: 180,
+    paddingTop: 20,
+    paddingBottom: 10,
+  },
+  chartLoadingContainer: {
+    height: 180,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  barWrapper: { alignItems: "center", marginHorizontal: 8, width: 36 },
+  barBackground: {
+    width: 24,
+    height: 120,
+    backgroundColor: "#e2e8f0",
+    borderRadius: 12,
+    justifyContent: "flex-end",
+    overflow: "hidden",
+  },
+  barFill: { width: "100%", backgroundColor: "#3b82f6", borderRadius: 12 },
+  barLabel: { fontSize: 11, color: "#64748b", marginTop: 8, fontWeight: "600" },
+  barValue: {
+    fontSize: 9,
+    color: "#94a3b8",
+    position: "absolute",
+    top: -15,
+    fontWeight: "bold",
+  },
+  noDataText: {
+    textAlign: "center",
+    color: "#94a3b8",
+    fontStyle: "italic",
+    paddingVertical: 40,
+  },
 });
